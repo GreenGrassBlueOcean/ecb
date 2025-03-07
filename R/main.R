@@ -10,7 +10,8 @@
 #' head(df)
 get_dataflows <- function(...) {
 
-  query_url <- "https://sdw-wsrest.ecb.europa.eu/service/dataflow"
+  query_url <- "https://data-api.ecb.europa.eu/service/dataflow"
+
 
   req <- make_request(query_url, "metadata", ...)
 
@@ -214,32 +215,85 @@ convert_dates <- function(x) {
   x
 }
 
+#' Create a Query URL for the ECB Data Portal
+#'
+#' This function constructs the full URL for querying the ECB Data Portal using a specified
+#' series key and an optional filter list. It supports both the new slash-based key format
+#' (e.g. `"EXR/M.USD.EUR.SP00.A"`) and the old dot-based key format (e.g. `"ICP.M.DE.N.000000+XEF000.4.ANR"`).
+#'
+#' If the key is provided in the old format, the function extracts the flow reference and series key
+#' using regular expressions and then converts it into the new slash-based format internally.
+#'
+#' @param key A character string specifying the series key. It may be in the new format ("FLOWREF/SERIESKEY")
+#'   or the old format ("FLOWREF.SERIESKEY"). If the key is not in the expected format, an error is thrown.
+#' @param filter An optional named list of filter parameters (e.g., `list(lastNObservations = 12)`). The values
+#'   in the filter will be URL-encoded. If the filter list contains an element named \code{updatedAfter},
+#'   its value is percent-encoded.
+#'
+#' @return A character string representing the full URL to query the ECB Data Portal.
+#'
+#' @examples
+#' # Using the new slash-based key format:
+#' create_query_url("EXR/M.USD.EUR.SP00.A", list(lastNObservations = 12))
+#'
+#' # Using the old dot-based key format:
+#' create_query_url("ICP.M.DE.N.000000+XEF000.4.ANR", list(lastNObservations = 12))
+#'
+#' @keywords internal
 create_query_url <- function(key, filter = NULL) {
+  # Base URL for the ECB Data Portal endpoint
+  url <- "https://data-api.ecb.europa.eu/service/data"
 
-  url <- "https://sdw-wsrest.ecb.europa.eu/service/data"
+  # Check if the key is in the new slash-based format
+  if (grepl("/", key)) {
+    # Split the key on the slash; expect exactly two parts: flow_ref and series_key
+    parts <- strsplit(key, "/")[[1]]
+    if (length(parts) != 2) {
+      stop("Key must have exactly one slash, e.g. 'FLOWREF/SERIESKEY'")
+    }
+    flow_ref  <- parts[1]
+    series_key <- parts[2]
+  } else {
+    # Fallback for old dot-based keys:
+    # Extract flow_ref from the beginning of the string (alphanumeric characters)
+    flow_ref <- regmatches(key, regexpr("^[[:alnum:]]+", key))
+    # Extract the remainder after the first period using invert = TRUE
+    key_q    <- regmatches(key, regexpr("^[[:alnum:]]+\\.", key), invert = TRUE)[[1]][2]
 
-  # Get flow reference (= dataset abbreviation, e.g. ICP or BOP)
-  flow_ref <- regmatches(key, regexpr("^[[:alnum:]]+", key))
-  key_q <- regmatches(key, regexpr("^[[:alnum:]]+\\.", key),
-                      invert = TRUE)[[1]][2]
-
-  if(any(names(filter) == "")) {
-    stop("All filter parameters must be named!")
+    if (is.na(key_q) || key_q == "") {
+      stop("Malformed key; if you're using the old format, it should look like 'ICP.M.DE.N.000000+XEF000.4.ANR'")
+    }
+    # For backward compatibility, combine the extracted parts with a slash.
+    flow_ref  <- flow_ref
+    series_key <- key_q
   }
 
-  if("updatedAfter" %in% names(filter)) {
-    filter$updatedAfter <- curl::curl_escape(filter$updatedAfter)
+  # Build query string if any filter parameters are provided
+  if (!is.null(filter) && length(filter) > 0) {
+    if (any(names(filter) == "")) {
+      stop("All filter parameters must be named!")
+    }
+    # If 'updatedAfter' is present, percent-encode its value
+    if ("updatedAfter" %in% names(filter)) {
+      filter$updatedAfter <- curl::curl_escape(filter$updatedAfter)
+    }
+    names_q  <- curl::curl_escape(names(filter))
+    values_q <- curl::curl_escape(as.character(filter))
+    query    <- paste0(names_q, "=", values_q, collapse = "&")
+    query    <- paste0("?", query)
+  } else {
+    query <- ""
   }
 
-  # Create parameter part of query string
-  names <- curl::curl_escape(names(filter))
-  values <- curl::curl_escape(as.character(filter))
-  query <- paste0(names, "=", values, collapse = "&")
-  query <- paste0("?", query)
-
-  query_url <- paste(url, flow_ref, key_q, query, sep = "/")
+  # Construct the base URL from the endpoint, flow reference, and series key
+  base_url <- paste(url, flow_ref, series_key, sep = "/")
+  # Append the query string without an extra slash
+  query_url <- paste0(base_url, query)
   query_url
 }
+
+
+
 
 check_status <- function(req) {
   if(req$status_code >= 400)
